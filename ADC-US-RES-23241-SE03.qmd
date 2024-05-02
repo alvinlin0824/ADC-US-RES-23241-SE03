@@ -1,0 +1,85 @@
+---
+title: "ADC-US-RES-23241 SE03 Yuwell `r params$title2`"
+description: "Continuous Glucose Monitoring System Comparison Study"
+author: "Alvin, Lin"
+date: "`r Sys.Date()`"
+date-format: full
+format:
+   html:
+     theme: flatly
+     embed-resources: true
+toc: true
+toc-depth: 3
+toc-location: left
+execute:
+  echo: false
+  warning: false
+  keep-md: true
+params:
+  plot: FALSE
+  analysis: TRUE
+  title1: "Profile Plot"
+  title2: "Accuracy Performance"
+---
+
+<!-- EDC \\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\OpenClinica\Current -->
+
+<!-- AUU \\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\UploadData -->
+
+<!-- CRF \\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-23241-CGM Comparison\Case Report Forms\Version_A\Approved\PDF -->
+
+<!-- DMP \\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-23241-CGM Comparison\CDM\Study_Binder\Data_Management_Plan\SE03\Version_1.0\Approved -->
+
+<!-- study request \\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-23241-CGM Comparison\Study Events_ Requests\SE_03 -->
+
+<!-- Conversion 18.016*mmol/L = mg/dL -->
+
+<!-- Sibionics dynamic range 2.2mmol/L ~ 25.0mmol/L	 -->
+
+`r if(params$analysis){htmltools::a("Study Request",href = gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-23241-CGM Comparison\Study Events_ Requests\SE_03\ADC_23241_SE03_Yuwell_EventRequest_Final_01Mar2024.pdf)"))}`
+```{r}
+#| label: Libaray Packages 
+#| message: false
+library(tidyverse)
+library(janitor)
+library(UUU)
+library(fs)
+library(measurements)
+library(survival)
+library(survminer)
+library(haven)
+library(vroom)
+library(ega)
+library(reactablefmtr)
+library(htmltools)
+library(measurements)
+library(highcharter)
+library(gt)
+```
+
+```{r}
+#| label: Import yuwell.txt and freestyle.csv
+#| eval: false
+file_list <- dir_ls(gsub("\\\\", "/", r"(\\Wf00168p.oneabbott.com\DATA1\cdm\ADC-US-RES-23241\SE03\UploadData)"),recurse = T, regexp = "*[0-9][.]txt$|*freestyle[.]csv$") |> 
+             path_filter(regexp = "Transfers", invert = T, ignore.case = T)
+```
+
+```{r}
+#| label: Output BG.rds
+#| warning: false
+#| eval: false
+freestyle(freestyle_path = path_filter(file_list, regexp = "Yuwell",ignore.case = T, invert = T))
+```
+
+```{r}
+#| label: output yuwell.rds
+#| eval: false
+file_list |>
+         path_filter(regexp = "Yuwell",ignore.case = T) |> 
+         set_names() |>
+         map(\(path) vroom::vroom(path,show_col_types = F, col_types = c(ErrorCode = "c")),.progress = T) |> 
+         list_rbind(names_to = "Path") |> 
+         dplyr::mutate(`Subject ID` = str_extract(Path,regex("(?<=117_ERA/00)[:digit:]{7}")),
+                       `Condition ID` = str_extract(Path,regex("(?<=[:digit:]{7}_)[:alpha:]{3}"))) |> 
+         select(Path, `Subject ID`, `Condition ID`, `Sensor Serial Number` = Name, `Date Time` = Time, Gl = Iw, ErrorCode)
+```
