@@ -16,8 +16,8 @@ execute:
   warning: false
   keep-md: true
 params:
-  plot: FALSE
-  analysis: TRUE
+  plot: TRUE
+  analysis: FALSE
   title1: "Profile Plot"
   title2: "Accuracy Performance"
 ---
@@ -68,7 +68,13 @@ file_list <- dir_ls(gsub("\\\\", "/", r"(\\Wf00168p.oneabbott.com\DATA1\cdm\ADC-
 #| label: Output BG.rds
 #| warning: false
 #| eval: false
-freestyle(freestyle_path = path_filter(file_list, regexp = "Yuwell",ignore.case = T, invert = T))
+freestyle(freestyle_path = path_filter(file_list, regexp = "Yuwell",ignore.case = T, invert = T)) |> 
+  saveRDS(gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-23241-CGM Comparison\Statistics\Programs\Datasets\SE03\AL\BG.rds)"))
+```
+
+```{r}
+#| label: Import BG.rds
+BG <- readRDS(gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-23241-CGM Comparison\Statistics\Programs\Datasets\SE03\AL\BG.rds)"))
 ```
 
 ```{r}
@@ -81,5 +87,131 @@ file_list |>
          list_rbind(names_to = "Path") |> 
          dplyr::mutate(`Subject ID` = str_extract(Path,regex("(?<=117_ERA/00)[:digit:]{7}")),
                        `Condition ID` = str_extract(Path,regex("(?<=[:digit:]{7}_)[:alpha:]{3}"))) |> 
-         select(Path, `Subject ID`, `Condition ID`, `Sensor Serial Number` = Name, `Date Time` = Time, Gl = Iw, ErrorCode)
+         select(Path, `Subject ID`, `Condition ID`, `Sensor Serial Number` = Name, `Date Time` = Time, Gl = Iw, ErrorCode) |> 
+         saveRDS(gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-23241-CGM Comparison\Statistics\Programs\Datasets\SE03\AL\yuwell.rds)"))
+```
+
+```{r}
+#| label: Import yuwell.rds
+yuwell <- readRDS(gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-23241-CGM Comparison\Statistics\Programs\Datasets\SE03\AL\yuwell.rds)"))
+```
+
+```{r}
+#|label: Import SA
+sa <- read_sas(gsub("\\\\", "/", r"(\\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\OpenClinica\Current\sa.sas7bdat)"))
+sa <- sa |>
+      filter(!str_detect(DUYN01,regex("Check here if no data recorded",ignore_case = T))) |>
+      mutate(Subject = as.character(Subject),
+             DUSEQ01 = as.character(DUSEQ01)) |>
+      arrange(Subject)
+```
+
+```{r}
+#|label: Import SR2
+sr2 <- read_sas(gsub("\\\\", "/", r"(\\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\OpenClinica\Current\sr2.sas7bdat)"))
+sr2 <- sr2 |>
+       filter(!is.na(DRDTC02)) |>
+       mutate(Subject = as.character(Subject)) |>
+       arrange(Subject)
+```
+
+```{r}
+#| label:  Remedy for Time shift
+yuwell <- yuwell |> 
+          left_join(sa |> 
+                    transmute(Subject = Subject,
+                       `Application Date and Time` = ymd_hm(str_c(DUDTC02,DUTM01,sep = " "))), 
+                  by = join_by(`Subject ID` == Subject)) |> 
+          dplyr::mutate(`Date Time` = case_when(`Subject ID` %in% c("1170003","1170004","1170005","1170006","1170007","1170008","1170009","1170010","1170011") 
+                       ~ `Date Time` + first(difftime(`Application Date and Time`,`Date Time`)),
+                                        .default = `Date Time`),
+                        `Application Date and Time` = NULL, .by = `Subject ID`)
+```
+
+```{r eval = params$plot}
+#| label: Distinct Subject ID and Condition ID
+UD <- yuwell |> 
+      distinct(`Subject ID`) |> 
+      pull()
+```
+
+```{r eval = params$plot}
+breakdown_condition_plot <- function(Id) {
+  highchart() %>%
+  # Add title
+  hc_title(text = str_c("Subject = ",Id)) %>% 
+  # continuous Sensor Data
+  # hc_add_series(
+    # name = "Libre Sensor Reading",
+    # data = UUU %>%
+    #        filter(`Subject ID` == Id,
+    #               Type != "SENSOR_STARTED (58)") %>%
+    #        # multiple and consecutive wears
+    #        arrange(`Date Time`) %>%
+    #        # 904 is Real-time glucose 906 is current glucose
+    #        mutate(Type = case_when(Type == "906" ~ "Current Glucose",
+    #                                Type == "904" ~ "Real-Time Glucose",
+    #                               .default =  "Historic Glucose")),
+    # type = "line",
+    # hcaes(x = datetime_to_timestamp(`Date Time`), y = Gl/18.016, group = Type)) %>%
+    # Sinocare data
+    hc_add_series(
+    name = "Yuwell",
+    data = yuwell %>%
+           filter(`Subject ID` == Id) |> 
+           arrange(`Date Time`),
+    type = "line",
+    # color = "#7FFF00",
+    # marker = list(symbol = "triangle"),
+    hcaes(x = datetime_to_timestamp(`Date Time`), y = Gl)) %>%
+    # BG data 
+    hc_add_series(
+    name = "BG Reference",
+    data = BG %>%
+           filter(`Subject ID` == Id),
+    type = "scatter",
+    color = "#FF0000",
+    marker = list(symbol = "triangle"),
+    hcaes(x = datetime_to_timestamp(`BG Date Time`), y = Reference/18.016)) %>%
+    # Add X label
+    hc_xAxis(title = list(text = "Date Time"),
+             type = "datetime", 
+             dateTimeLabelFormats = list(day = '%d %b %y')) %>%
+    # Add Y axis
+    hc_yAxis(title = list(text = "Glucose(mmol/L)")) %>%
+    # Change the size of marker
+    hc_plotOptions(scatter = list(
+                            marker = list(radius = 1.9, symbol = "circle"))) %>%
+    # Change the format of point
+    hc_tooltip(pointFormat = '{point.x: %Y-%m-%d %H:%M:%S} {point.y:.1f} ')  %>% 
+    # Add zoom in function
+    hc_chart(zoomType = "xy") %>% 
+    # Add navigator
+    hc_navigator(enabled = TRUE)
+    # {if (UUU %>%
+    #      filter(Type != "SENSOR_STARTED (58)") %>%
+    #      filter(`Subject ID` == Id, `Condition ID` == Condition) %>%
+    #      nrow() != 0)
+    #      hc_navigator(.,enabled = TRUE) else .}  %>%
+    # {if (UUU %>%
+    #      filter(Type != "SENSOR_STARTED (58)") %>%
+    #      filter(`Subject ID` == Id, `Condition ID` == Condition) %>%
+    #      nrow() == 0)
+    #      hc_navigator(.,enabled = TRUE,series = list(color = "white")) else .}
+}
+```
+
+```{r}
+#| eval: false
+breakdown_condition_plot(Id = "1170004")
+```
+
+```{r eval = params$plot}
+#| label: For Loop Plots
+#| column: screen
+plots <- list()
+for (i in 1:length(UD)){
+  plots[[i]] <- breakdown_condition_plot(Id = UD[i])
+}
+htmltools::tagList(plots)
 ```
