@@ -16,8 +16,8 @@ execute:
   warning: false
   keep-md: true
 params:
-  plot: TRUE
-  analysis: FALSE
+  plot: FALSE
+  analysis: TRUE
   title1: "Profile Plot"
   title2: "Accuracy Performance"
 ---
@@ -86,8 +86,9 @@ file_list |>
          map(\(path) vroom::vroom(path,show_col_types = F, col_types = c(ErrorCode = "c")),.progress = T) |> 
          list_rbind(names_to = "Path") |> 
          dplyr::mutate(`Subject ID` = str_extract(Path,regex("(?<=117_ERA/00)[:digit:]{7}")),
-                       `Condition ID` = str_extract(Path,regex("(?<=[:digit:]{7}_)[:alpha:]{3}"))) |> 
-         select(Path, `Subject ID`, `Condition ID`, `Sensor Serial Number` = Name, `Date Time` = Time, Gl = Iw, ErrorCode) |> 
+                       `Condition ID` = str_extract(Path,regex("(?<=[:digit:]{7}_)[:alpha:]{3}")),
+                       `Sensor Serial Number` = str_extract(Path,regex("(?<=SN)[:digit:]+"))) |> 
+         select(Path, `Subject ID`, `Condition ID`, `Sensor Serial Number`, `Date Time` = Time, Gl = Iw, ErrorCode) |> 
          saveRDS(gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-23241-CGM Comparison\Statistics\Programs\Datasets\SE03\AL\yuwell.rds)"))
 ```
 
@@ -98,11 +99,24 @@ yuwell <- readRDS(gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Cl
 
 ```{r}
 #|label: Import SA
-sa <- read_sas(gsub("\\\\", "/", r"(\\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\OpenClinica\Current\sa.sas7bdat)"))
+sa <- read_sas(gsub("\\\\", "/", r"(\\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\OpenClinica\Current\sa.sas7bdat)")) |> 
+      bind_rows(
+      read_sas(gsub("\\\\", "/", r"(\\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\OpenClinica\Current\sa002.sas7bdat)")))
 sa <- sa |>
       filter(!str_detect(DUYN01,regex("Check here if no data recorded",ignore_case = T))) |>
       mutate(Subject = as.character(Subject),
              DUSEQ01 = as.character(DUSEQ01)) |>
+      arrange(Subject)
+```
+
+```{r}
+#|label: Import DE
+de <- read_sas(gsub("\\\\", "/", r"(\\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\OpenClinica\Current\de.sas7bdat)"))
+de <- de |>
+      filter(!str_detect(DEYN01,regex("Check here if no data recorded",ignore_case = T))) |>
+      mutate(Subject = as.character(Subject),
+             DESPID02 = as.character(DESPID02),
+             DEORES02 = str_to_sentence(DEORES02)) |>
       arrange(Subject)
 ```
 
@@ -116,26 +130,703 @@ sr2 <- sr2 |>
 ```
 
 ```{r}
+#|label: Import DM
+dm <- read_sas(gsub("\\\\", "/", r"(\\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\OpenClinica\Current\dm.sas7bdat)"))
+dm <- dm |>
+      filter(!str_detect(DMYN,regex("Check here if no data recorded",ignore_case = T))) |>
+      mutate(Subject = as.character(Subject)) |>
+      arrange(Subject)
+```
+
+```{r}
+#|label: Import MH1
+mh1 <- read_sas(gsub("\\\\", "/", r"(\\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\OpenClinica\Current\mh1.sas7bdat)"))
+mh1 <- mh1 |>
+       filter(!str_detect(MHYN01,regex("Check here if no data recorded",ignore_case = T))) |>
+       mutate(Subject = as.character(Subject)) |>
+       arrange(Subject)
+```
+
+```{r}
+#|label: Import VS
+vs <- read_sas(gsub("\\\\", "/", r"(\\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\OpenClinica\Current\vs.sas7bdat)"))
+vs <- vs |>
+      filter(!str_detect(VSYN01,regex("Check here if no data recorded",ignore_case = T))) |>
+      mutate(Subject = as.character(Subject),
+             across(starts_with("VSOR"), ~ as.numeric(.x))) |>
+      arrange(Subject)
+```
+
+```{r}
+#| label: Full Join sa and sr2
+sasr2 <- sa |> 
+         select(Subject,DUSEQ01,DUCOD01,DUSPID03,DUDTC02,DUTM01) |> 
+         # Remove sensor replaced
+         anti_join(de |>
+                   filter(str_detect(DEORES06,regex("Sensor replaced",ignore_case = T))),
+                   by = c("Subject" = "Subject","DUSEQ01" = "DESPID02")) |>
+         left_join(sr2 |>
+                   select(Subject,DRID01,DRDTC02,DRTM01) |> 
+                   distinct(),
+                   by = join_by(Subject,DUSEQ01 == DRID01)) |>
+         mutate(`Application Date and Time` = ymd_hm(str_c(DUDTC02,DUTM01,sep = " ")),
+                `Removal Date and Time` = ymd_hm(str_c(DRDTC02,DRTM01,sep = " ")),
+                `Time On-body (Hours)` = round(as.numeric(difftime(`Removal Date and Time`,`Application Date and Time`,units = "hours"))+0.001,0),
+                   `Time On-body (Days)` = round(as.numeric(difftime(`Removal Date and Time`,`Application Date and Time`,units = "days"))+0.001,0),
+                 # Censoring
+                    Status = case_when(`Time On-body (Days)` >= 13.5 | 
+                                  is.na(`Time On-body (Days)`) ~ 0,
+                                           .default = 1),
+                   .keep = "unused")
+```
+
+`r if(params$analysis){knitr::asis_output("# **Investigate Errorcode**")}`
+```{r eval = params$analysis}
+#| label: Investigate Errorcode
+my_sum <- list(
+  Mean = ~ mean(.x,na.rm = T),
+  Median = ~ median(.x,na.rm = T),
+  SD = ~ sd(.x,na.rm = T),
+  Min = ~ min(.x,na.rm = T),
+  Max = ~ max(.x,na.rm = T),
+  N = ~ sum(!is.na(.x),na.rm = T)
+)
+
+yuwell |> 
+    group_by(ErrorCode) |> 
+    summarise_at("Gl",.funs = my_sum) |> 
+    gt() |>
+    opt_stylize(style = 6, color = "blue") |>
+    cols_align(align = "center",columns = everything()) |>
+    fmt_number(columns = !N,decimals = 2) |> 
+    tab_header(title = md("**Glucose Group By Errorcode**"))
+```
+
+```{r eval = params$analysis}
+#| label: Investigate Errorcode Distrubution Plot
+#| fig-align: center
+yuwell |> 
+    ggplot(aes(x = ErrorCode, y = Gl,color = ErrorCode)) +
+    geom_boxplot()
+```
+
+
+`r if(params$analysis){knitr::asis_output("# **Demographic**")}`
+```{r eval = params$analysis}
+#| label: Demographics function
+my_fun <- function(group_var){
+    dm |>
+       select(Subject,SEX,ETHNIC:EDU) |>
+       full_join(mh1 |>
+                 mutate(MHORES01 = case_when(MHORES01 == "Type2" ~ "Type 2",
+                                             .default = MHORES01)) |> 
+                 select(Subject,MHORES01),by = c("Subject")) |>
+  transmute(SEX = factor(SEX,levels = c("Female","Male")),
+            ETHNIC = factor(ETHNIC,levels = c("Hispanic or Latino","Not Hispanic or Latino")),
+            RACE = case_when(RACE == "White" ~ str_c(RACE,ETHNIC,sep = " - "),
+                             .default = RACE),
+            RACE = factor(RACE,levels = c("White - Not Hispanic or Latino","White - Hispanic or Latino","American Indian or Alaska Native","Asian","Black or African American","Native Hawaiian or Pacific Islander","Other")),
+            EDU = factor(EDU,levels = c("Grade 0-8","High School (Grades 9-12)","Some College (1-4 years)","Bachelor's Degree (BA BS etc)","Master's Degree (MA MS etc)","Doctorate or Professional school degree (PhD EdD MD JD etc)")),
+            MHORES01 = factor(MHORES01,levels = c("Type 1","Type 2","Other: Non-Diabetic"))
+          ) |>
+    tabyl({{group_var}},show_na = FALSE) |>
+    as_tibble() |>
+    transmute(Charateristic = {{group_var}},
+              N = n,
+             `%` = 100*(round(percent,3)))
+}
+```
+
+```{r eval = params$analysis}
+#| label: Demographics Table
+#| warning: false
+c("SEX","RACE","EDU","MHORES01") |> 
+  map(~ my_fun(.data[[.x]])) |> 
+  list_rbind() |> 
+  gt() |>
+  opt_stylize(style = 6, color = "blue") |>
+  cols_align(align = "center",columns = everything()) |>
+  tab_header(title = md("**Subject Demographics and Diabetes History**")) |> 
+  tab_row_group(label = "Type of Diabetes",rows = c(16:18)) |>
+  tab_row_group(label = "Education",rows = c(10:15)) |>
+  tab_row_group(label = "Race",rows = c(3:9)) |>
+  tab_row_group(label = "Sex",rows = c(1:2))
+```
+
+```{r eval = params$analysis}
+#| label: Baseline Characteristics Function
+my_sum <- list(
+  Mean = ~ mean(.x,na.rm = T),
+  Median = ~ median(.x,na.rm = T),
+  SD = ~ sd(.x,na.rm = T),
+  Min = ~ min(.x,na.rm = T),
+  Max = ~ max(.x,na.rm = T)
+)
+
+my_fun1 <- function(Var){
+    dm |>
+    select(Subject,AGE) |>
+    full_join(vs |>
+                select(Subject,starts_with("VSO")),by = "Subject") |>
+    full_join(mh1 |>
+                 select(Subject,MHDTC01,MHDTC02),by = "Subject") |>
+    transmute(AGE = AGE,
+              VSORES03 = VSORES03,
+              Kg = conv_unit(VSORES03,"lbs","kg"),
+              Inches = VSORES01*12 + VSORES02,
+              Meters = conv_unit(Inches,"inch","m"),
+              BMI = Kg/(Meters)^2,
+              DD = year(MHDTC01) - year(MHDTC02)) |>
+    summarise(across(c({{Var}}),my_sum,.names = "{.fn}")) |>
+    mutate(across(everything(), ~ format(round(.x,1),nsmall=1))) |>
+    transmute(`Mean ± SD` = str_c(Mean," ± ",SD),
+              Median = Median,
+              Range = str_c(Min," - ",Max))
+}
+```
+
+```{r eval = params$analysis}
+#| label: Baseline Characteristics
+c("AGE","VSORES03", "Kg","Inches","Meters","BMI","DD") |> 
+    map(~ my_fun1(.data[[.x]])) |>
+    list_rbind() |> 
+    add_column(Characteristics = c("Age (Years)","Weight (Pounds)","Weight (Kilograms)","Height (Inches)","Height (Meters)","Body Mass Index (BMI)","Duration of diabetes (years)"),.before = "Mean ± SD") |> 
+    gt() |>
+    opt_stylize(style = 6, color = "blue") |>
+    cols_align(align = "center",columns = everything()) |>
+    tab_header(title = md("**Baseline Characteristics**"))
+```
+
+```{r}
 #| label:  Remedy for Time shift
 yuwell <- yuwell |> 
-          left_join(sa |> 
-                    transmute(Subject = Subject,
-                       `Application Date and Time` = ymd_hm(str_c(DUDTC02,DUTM01,sep = " "))), 
-                  by = join_by(`Subject ID` == Subject)) |> 
-          dplyr::mutate(`Date Time` = case_when(`Subject ID` %in% c("1170003","1170004","1170005","1170006","1170007","1170008","1170009","1170010","1170011") 
+            left_join(sa |> 
+                      # Remove sensor replaced
+                      anti_join(de |>
+                                filter(str_detect(DEORES06,regex("Sensor replaced",ignore_case = T))),
+                                by = c("Subject" = "Subject","DUSEQ01" = "DESPID02")) |> 
+            transmute(Subject = Subject,
+                      `Application Date and Time` = ymd_hm(str_c(DUDTC02,DUTM01,sep = " "))),
+                        by = join_by(`Subject ID` == Subject)) |> 
+            dplyr::mutate(`Date Time` = case_when(`Subject ID` %in% c("1170003","1170004","1170005","1170006","1170007","1170008","1170009","1170010","1170011")
                        ~ `Date Time` + first(difftime(`Application Date and Time`,`Date Time`)),
                                         .default = `Date Time`),
-                        `Application Date and Time` = NULL, .by = `Subject ID`)
+                        `Application Date and Time` = NULL, .by = `Subject ID`) |> 
+            # Remove glucose readings with errorcode = 11 or 16 
+            filter(!ErrorCode %in% c("11","16"))
+```
+
+```{r eval = params$analysis}
+#| label: Paired BG
+Ap <- yuwell |> 
+      select(!Path) |> 
+      mutate(eTime = as.numeric(difftime(`Date Time`,first(`Date Time`),units = "days")),
+             Day = floor(eTime) + 1,
+             Sensor = "Yuwell",
+             .by = c(`Subject ID`,`Condition ID`,`Sensor Serial Number`)) |>
+      # Remove Extreme 25 readings < 2.2 or > 25.0
+      filter(between(Gl,2.2,25.0)) |> 
+      group_split(`Subject ID`,`Condition ID`,`Sensor Serial Number`) |>
+      # New anonymous function
+      map(\(df) PairBg(sensor_data = df,apol = F),.progress = T) |>
+      # formula syntax
+      # map(~ PAIRBG_fun(data = .x)) %>%
+      list_rbind() |> 
+      # Row-wise Calculation
+      mutate(`Reference Type` = "BG",
+              Reference_mmol = Reference/18.016,
+             # Reference glucose values < 100 mg/dL
+            `Difference(mmol/L)` = Gl - Reference_mmol,
+            `Absolute Difference(mmol/L)` = abs(`Difference(mmol/L)`),
+            # Reference glucose values >= 100 mg/dL
+            `Relative Difference(%)` = (`Difference(mmol/L)`/Reference_mmol)*100,
+            `Absolute Relative Difference(%)` = abs(`Relative Difference(%)`),
+            `Glucose Level(mg/dL) [mmol/L]` = fct_case_when(round(Reference + 0.001) < 54 ~ "<54 [3.0]",
+                           between(round(Reference + 0.001),54,69) ~ "54 to 69 [3.0-3.8]",
+                           between(round(Reference + 0.001),70,180) ~ "70 to 180 [3.9-10.0]",
+                           between(round(Reference + 0.001),181,250) ~ "181 to 250 [10.0-13.9]",
+                                      TRUE ~ ">250 [13.9]"),
+             `Wear Period` = fct_case_when(Day <= 3 ~ "Beginning",
+                                           between(Day,4,8) ~ "Early Middle",
+                                           between(Day,9,12) ~ "Late Middle",
+                                           TRUE ~ "End"))
+``` 
+
+`r if(params$analysis){knitr::asis_output("# **Survival Analysis**")}`
+```{r}
+#| label: Wear for upload
+surv_data <- yuwell |> 
+             select(`Subject ID`,`Date Time`) |> 
+             mutate(Sensor = "Yuwell") |> 
+             group_by(`Subject ID`) |> 
+             slice(1,n()) |> 
+             mutate(ID = c("Sensor Start Time","Sensor End Time")) |> 
+             ungroup() |> 
+             pivot_wider(id_cols = c(`Subject ID`,Sensor),names_from = ID,values_from = `Date Time`) |> 
+             mutate(`Sensor Start Time` = case_when(Sensor == "SiBionics" ~ `Sensor Start Time` - dhours(1),
+                                         .default = `Sensor Start Time`),
+                    `Time Operational(Hours)` =
+                          round(as.numeric(difftime(`Sensor End Time`,`Sensor Start Time`,units = "hours"))+0.001,0),
+                          `Time Operational(Days)` = round(`Time Operational(Hours)`/24 + 0.001,0),
+                              # Censoring
+                            Status = case_when(`Time Operational(Days)` >= 13.5 |
+                                                is.na(`Time Operational(Days)`) ~ 0,
+                                                .default = 1))
+```
+
+```{r eval = params$analysis}
+#| label: Summary Table
+#| column: body-outset
+bind_cols(
+dm |>
+   summarise(`Number of Subjects enrolled` = n_distinct(Subject)),
+sa |> 
+    select(Subject,DUSEQ01,DUCOD01,DUSPID03,DUDTC02,DUTM01) |> 
+    # Remove sensor replaced
+    anti_join(de |>
+              filter(str_detect(DEORES06,regex("Sensor replaced",ignore_case = T))),
+              by = c("Subject" = "Subject","DUSEQ01" = "DESPID02")) |> 
+    summarise(`Number of sensors(EDC)` = n_distinct(Subject)),
+yuwell |> 
+    summarise(`Number of sensors(Upload)` = n_distinct(`Subject ID`)),
+Ap |>
+   summarise(`Number of sensors(Paired)` = n_distinct(`Subject ID`)),
+Ap |>
+   filter(any(Day == 14),.by = `Subject ID`) |> 
+   summarise(`Number of sensors(Paired) with 14 Days` = n_distinct(`Subject ID`))) |> 
+   gt()  |>
+   cols_align(align = "center") |> 
+   opt_stylize(style = 6, color = "blue")
+```
+
+```{r eval = params$analysis}
+#| label: 14 UUU survival summary
+#| column: body-outset
+my_Sum <- list(Mean = ~ mean(.x, na.rm = T),
+                 Median = ~ median(.x, na.rm = T),
+                 SD = ~ sd(.x, na.rm = T),
+                 Minimum = ~ min(.x, na.rm = T),
+                 Maximum = ~ max(.x, na.rm = T))
+
+surv_data |> 
+        group_by(Sensor) |> 
+        summarise(across(c(`Time Operational(Days)`),my_Sum,.names = "{.fn}"),
+                  `No. Sensors in Analysis` = sum(!is.na(`Time Operational(Days)`))
+                              ) |> 
+        left_join(surv_data |>
+                  group_by(Sensor) |>
+                  filter(`Time Operational(Days)` > 13.5) %>%
+                  summarise(`No. Successful Wears (14 days)` = n()),by = "Sensor") |>
+        mutate(`% Successful Wears (14 days)` = round(100*(`No. Successful Wears (14 days)`/`No. Sensors in Analysis`) + 0.001,1)) |>
+        gt() |>
+        opt_stylize(style = 6, color = "blue") |>
+        cols_align(align = "center",columns = everything()) |>
+        tab_header(title = md("**Sensor Glucose Duration**")) |>
+        fmt_number(columns = c(Mean,SD),decimals = 1) |> 
+        sub_missing(columns = everything(),missing_text = "")
+```
+
+```{r eval = params$analysis}
+#| label: Survival Model
+fit <- survfit(Surv(`Time Operational(Hours)`,Status) ~ 1, data = surv_data)   
+```
+
+```{r eval = params$analysis}
+#| label: Survival Plot Function
+#| fig-align: center
+survfit(Surv(`Time Operational(Days)`, Status) ~ 1, data = surv_data) %>%
+ggsurvplot(data = surv_data,ggtheme = theme_classic(),xlab = "Day", ylab = "Survival Probability Estimate (%)",xlim = c(0,14),break.x.by = 1,break.y.by = 0.1,censor = F,surv.scale = "percent",conf.int = F, palette = "Black",legend = "none")
+```
+
+```{r eval = params$analysis}
+#| label: Survival Table
+summary(fit, times = c(seq(0,336,12)))[c("time","n.risk","n.event","surv","std.err")] |> 
+  as_tibble() |> 
+  dplyr::mutate(
+                Day = time/24,
+               `Number of Remaining Sensors` = n.risk,
+               `Number of Failed Sensors` = cumsum(n.event),
+               `Survival Probability Estimate (%)` = 100*surv,
+               `Estimate SE (%)` = 100*std.err,
+                 .keep = "unused") |>
+  filter(Day %in% c(seq(0,14,1),14.5)) |>
+  gt() |>
+  cols_align(align = "center") |>
+  fmt_number(columns = contains("%"),decimals = 1) |>
+  opt_stylize(style = 6, color = "blue")
+```
+
+`r if(params$analysis){knitr::asis_output("# **Accuracy Performance**")}`
+
+`r if(params$analysis){knitr::asis_output("## Difference Measures")}`
+```{r eval = params$analysis}
+#| label: MARD Line Plot
+#| fig-align: center
+Ap |> 
+   group_by(Day) |> 
+   summarise(`MARD(%)` = mean(`Absolute Relative Difference(%)`,na.rm = T),
+             N = n(),.groups = "drop") |> 
+   ggplot(aes(x = Day, y = `MARD(%)`)) +
+   geom_line() +
+   geom_point(aes(size = N)) + 
+   labs(title = "MARD by Day") +
+   scale_x_continuous(breaks = seq(1,15,1),limits = c(1,15)) + 
+   theme_bw() +
+   theme(panel.grid.major.y = element_blank(),panel.grid.minor.y = element_blank(),legend.position = "bottom",plot.title = element_text(hjust = 0.5),legend.text = element_text(size = 8)) + 
+   guides(size = guide_legend(title = "Number of Pairing"))
+```
+
+```{r eval = params$analysis}
+#| label: Bias Line Plot
+#| fig-align: center
+Ap |> 
+   group_by(Day) |> 
+   summarise(`Mean Bias(%)` = mean(`Relative Difference(%)`,na.rm = T),
+             N = n(),.groups = "drop") |> 
+   ggplot(aes(x = Day, y = `Mean Bias(%)`)) +
+   geom_line() +
+   geom_point(aes(size = N)) + 
+   labs(title = "Mean Bias(%) by Day") +
+   scale_x_continuous(breaks = seq(1,15,1),limits = c(1,15)) + 
+   theme_bw() +
+   theme(panel.grid.major.y = element_blank(),panel.grid.minor.y = element_blank(),legend.position = "bottom",plot.title = element_text(hjust = 0.5),legend.text = element_text(size = 8)) + 
+   guides(size = guide_legend(title = "Number of Pairing"))
+```
+
+```{r eval = params$analysis}
+#| label: Real Time Difference Measures
+#| column: page
+Ap |> 
+   diff_measure(type = "Glucose", ref = Reference_mmol, cgm = Gl, breakpoint = 5.6, col_subject = `Subject ID`, group_var = NULL,unit = "mmol/L") |> 
+   tab_header(title = md("**Difference Measures at 100 mg/dL breakpoint**"))
+```
+
+```{r eval = params$analysis}
+#| label: Real Time Difference Measures group by Reference Level
+#| column: page
+Ap |> 
+   bind_rows(Ap |>
+             mutate(`Glucose Level(mg/dL) [mmol/L]` = "Overall",
+                    `Glucose Level(mg/dL) [mmol/L]` = fct_expand(`Glucose Level(mg/dL) [mmol/L]`,"Overall"))) |>
+   diff_measure(type = "Glucose", ref = Reference_mmol, cgm = Gl, breakpoint = 5.6, col_subject = `Subject ID`, group_var = c("Glucose Level(mg/dL) [mmol/L]"),reference_breakpoint = F,unit = "mmol/L") |> 
+   tab_header(title = md("**Difference Measures Group by Reference Glucose Level**"))
+```
+
+```{r eval = params$analysis}
+#| label: Real Time Difference Measures group by Wear Period
+#| column: page
+Ap |> 
+   diff_measure(type = "Glucose", ref = Reference_mmol, cgm = Gl, breakpoint = 5.6, col_subject = `Subject ID`, group_var = c("Wear Period"),reference_breakpoint = FALSE ,unit = "mmol/L") |> 
+   tab_header(title = md("**Difference Measures Group by Wear Period**"))
+```
+
+```{r eval = params$analysis}
+#| label: Real Time Difference Measures group by Day
+#| column: page
+Ap |> 
+   diff_measure(type = "Glucose", ref = Reference_mmol, cgm = Gl, breakpoint = 5.6, col_subject = `Subject ID`, group_var = c("Day"),reference_breakpoint = FALSE ,unit = "mmol/L") |> 
+   tab_header(title = md("**Difference Measures Group by Day**"))
+```
+
+```{r eval = params$analysis}
+#| label: Real Time Difference Measures group by Subject
+#| column: page
+Ap |> 
+   diff_measure(type = "Glucose", ref = Reference_mmol, cgm = Gl, breakpoint = 5.6, col_subject = `Subject ID`, group_var = c("Subject ID"),reference_breakpoint = FALSE, unit = "mmol/L") |> 
+   tab_header(title = md("**Difference Measures Group by Subject**"))
+```
+
+`r if(params$analysis){knitr::asis_output("## System Agreement Analysis")}`
+```{r eval = params$analysis}
+#| label: System Agreement Plot
+#| fig-align: center
+Ap |> 
+  ggplot() +
+  geom_point(aes(x = Reference_mmol, y = `Difference(mmol/L)`)) +
+  labs(title = "System Agreement Plot",x = "BG Reference (mmol/L)", y = "Bias (mmol/L)") +
+  scale_y_continuous(breaks = seq(-20,20,5),limits = c(-20,20)) +
+  scale_x_continuous(breaks = seq(0,30,5),limits = c(0,30)) +
+  theme_bw() +
+  theme(panel.grid.major.y = element_blank(),panel.grid.minor.y = element_blank(),legend.position = "bottom",plot.title = element_text(hjust = 0.5), aspect.ratio = 1)
+```
+
+```{r eval = params$analysis}
+#| label: System Accuracy Results Group by Reference Level
+#| column: page
+Ap |> 
+   system_agreement(type = "Glucose", breakpoint = 70, ref = Reference_mmol, cgm = Gl, group_var = NULL, transpose = F,unit = "mmol/L") |> 
+   tab_header(title = md("**System Accuracy Results Group by Reference Level**"))
+```
+
+```{r eval = params$analysis}
+#| label: System Accuracy Results Group by Reference Glucose Level
+#| column: page
+Ap |> 
+   system_agreement(type = "Glucose", breakpoint = 70, ref = Reference_mmol, cgm = Gl, group_var = c("Glucose Level(mg/dL) [mmol/L]"), transpose = F,unit = "mmol/L") |> 
+   tab_header(title = md("**System Accuracy Results Group by Reference Glucose Level**"))
+```
+
+```{r eval = params$analysis}
+#| label: System Accuracy Results Group by Wear Period
+#| column: page
+Ap |>
+   system_agreement(type = "Glucose", breakpoint = 70, ref = Reference_mmol, cgm = Gl, group_var = c("Wear Period"), transpose = F ,unit = "mmol/L") |> 
+   tab_header(title = md("**System Accuracy Results Group by Wear Period**"))
+```
+
+```{r eval = params$analysis}
+#| label: System Accuracy Results Group by Sensor Wear
+#| column: page
+Ap |>
+   system_agreement(type = "Glucose", breakpoint = 70, ref = Reference_mmol, cgm = Gl, group_var = c("Day"), transpose = F,unit = "mmol/L") |> 
+   tab_header(title = md("**System Accuracy Results Group by Sensor Wear**"))
+```
+
+```{r eval = params$analysis}
+#| label: System Accuracy Results Group by Subject
+#| column: page
+Ap |>
+   system_agreement(type = "Glucose", breakpoint = 70, ref = Reference_mmol, cgm = Gl, group_var = c("Subject ID"), transpose = F,unit = "mmol/L") |> 
+   tab_header(title = md("**System Accuracy Results Group by Subject**"))
+```
+
+`r if(params$analysis){knitr::asis_output("## Consensus Error Grid")}`
+```{r eval = params$analysis}
+#| label: Error Grid Function
+error_grid_plot <- function (df,referenceVals, testVals, 
+                             show_plot = FALSE,
+                             type = 1, title = "",
+                             xlab = "", ylab = "", linesize = 0.5, linetype = "solid",
+                             linecolor = "black", linealpha = 0.6, pointsize = 2,
+                             pointalpha = 0.6, zones = NA, unit = "gram")
+{
+    data1 <- df |> 
+             mutate(ref = {{referenceVals}},
+                    test = {{testVals}})
+    
+  if (type != 1 & type != 2) {
+    stop("'type' must be 1 or 2.")
+  }
+  if (unit != "mol" & unit != "gram") {
+    stop("'unit' must be either 'mol' or 'gram'.")
+  }
+  if (title == "") {
+    title <- paste("Parkes (Consensus) Error Grid for Type ",
+                   type, " Diabetes")
+  }
+  if (unit == "mol") {
+    n <- 18
+    if (xlab == "") {
+      xlab = "Reference Glucose Concentration (mmol/L)"
+    }
+    if (ylab == "") {
+      ylab = "Test Glucose Concentration (mmol/L)"
+    }
+  }
+  else {
+    n <- 1
+    if (xlab == "") {
+      xlab = "Reference Glucose Concentration (mg/dL)"
+    }
+    if (ylab == "") {
+      ylab = "Test Glucose Concentration (mg/dL)"
+    }
+  }
+  if (is.na(zones)) {
+    zones <- getParkesZones(data1$ref, data1$test, type,unit)
+  }
+  ref <- test <- NULL
+  
+  data <- data1 |> 
+          mutate(Zones = zones)
+  
+  maxX <- max(max(data$ref) + 20/n, 550/n)
+  maxY <- max(max(data$test) + 20/n, 550/n)
+  labels <- data.frame(x = c(450, 220/n, 385/n, 140/n, 405/n,
+                             415/n, 75/n, 21/n),
+                       y = c(450, 360/n, 235/n, 375/n,145/n,
+                             50/n, 383/n, 383/n),
+                       # facet = c(sort(rep(unique(data$facet),8))),
+        label = c("A", "B","B", "C", "C", "D", "D","E"),
+        color = c("gray30", "gray30", "gray30","gray30", "gray30", "gray30", "gray30", "gray30"))
+
+  if (type == 1) {
+    ce <- ega:::.coef(35, 155, 50, 550)
+    cdu <- ega:::.coef(80, 215, 125, 550)
+    cdl <- ega:::.coef(250, 40, 550, 150)
+    ccu <- ega:::.coef(70, 110, 260, 550)
+    ccl <- ega:::.coef(260, 130, 550, 250)
+    cbu <- ega:::.coef(280, 380, 430, 550)
+    cbl <- ega:::.coef(385, 300, 550, 450)
+    x1 <- y1 <- xend <- yend <- NULL
+    border <- data.frame(x1 = c(0/n, 0/n, 30/n, 140/n, 280/n,
+                                50/n, 50/n, 170/n, 385/n, 0/n, 30/n, 50/n, 70/n,
+                                120/n, 120/n, 260/n, 0/n, 25/n, 50/n, 80/n, 250/n,
+                                250/n, 0/n, 35/n),
+                         y1 = c(0/n, 50/n, 50/n, 170/n,
+                                380/n, 0/n, 30/n, 145/n, 300/n, 60/n, 60/n, 80/n,
+                                110/n, 0/n, 30/n, 130/n, 100/n, 100/n, 125/n, 215/n,
+                                0/n, 40/n, 150/n, 155/n),
+                         xend = c(min(maxX, maxY),
+                                  30/n, 140/n, 280/n,
+                                  ega:::.endx(280/n, 380/n, maxY, cbu),
+                                  50/n, 170/n, 385/n, maxX, 30/n, 50/n, 70/n,
+                                  ega:::.endx(70/n,110/n, maxY, ccu),
+                                  120/n, 260/n, maxX, 25/n,50/n, 80/n,
+                                  ega:::.endx(80/n, 215/n, maxY, cdu), 250/n,
+                                  maxX, 35/n, ega:::.endx(35/n, 155/n, maxY, ce)),
+                         yend = c(min(maxX,maxY), 50/n, 170/n, 380/n, maxY, 30/n, 145/n, 300/n,
+                                  ega:::.endy(385/n, 300/n, maxX, cbl), 60/n, 80/n, 110/n,
+                                  maxY, 30/n, 130/n, ega:::.endy(260/n, 130/n, maxX, ccl),
+                                  100/n, 125/n, 215/n, maxY, 40/n, ega:::.endy(410/n, 110/n,
+                                  maxX, cdl), 155/n, maxY))
+  }
+  else {
+    ce <- ega:::.coef(35, 200, 50, 550)
+    cdu <- ega:::.coef(35, 90, 125, 550)
+    cdl <- ega:::.coef(410, 110, 550, 160)
+    ccu <- ega:::.coef(30, 60, 280, 550)
+    ccl <- ega:::.coef(260, 130, 550, 250)
+    cbu <- ega:::.coef(230, 330, 440, 550)
+    cbl <- ega:::.coef(330, 230, 550, 450)
+    border <- data.frame(x1 = c(0/n, 0/n, 30/n, 230/n, 50/n,
+                                50/n, 90/n, 330/n, 0/n, 30/n, 90/n, 260/n, 0/n, 25/n,
+                                35/n, 250/n, 250/n, 410/n, 0/n, 35/n),
+                         y1 = c(0/n,50/n, 50/n, 330/n, 0/n, 30/n, 80/n, 230/n, 60/n,
+                                60/n, 0/n, 130/n, 80/n, 80/n, 90/n, 0/n, 40/n, 110/n,
+                                200/n, 200/n),
+                         xend = c(min(maxX, maxY), 30/n, 230/n,
+                                  ega:::.endx(230/n, 330/n, maxY, cbu), 50/n, 90/n, 330/n,
+                                  maxX, 30/n, ega:::.endx(30/n, 60/n, maxY, ccu), 260/n,
+                                  maxX, 25/n, 35/n, ega:::.endx(35/n, 90/n, maxY, cdu), 250/n,
+                                  410/n, maxX, 35/n, ega:::.endx(35/n, 200/n, maxY, ce)),
+                         yend = c(min(maxX, maxY), 50/n, 330/n, maxY, 30/n,
+                                  80/n, 230/n, ega:::.endy(330/n, 230/n, maxX, cbl),
+                                  60/n, maxY, 130/n, ega:::.endy(260/n, 130/n, maxX,ccl),
+                                  80/n, 90/n, maxY, 40/n, 110/n, ega:::.endy(410/n,110/n,
+                                  maxX, cdl), 200/n, maxY))
+  }
+
+
+ plot <- ggplot(data, aes(x = ref, y = test)) +
+         scale_x_continuous(breaks = c(0,round(70/n,digits = 1), round(100/n, digits = 1), round(150/n, digits = 1),round(180/n, digits = 1), round(240/n, digits = 1), round(300/n,
+         digits = 1), round(350/n, digits = 1), round(400/n,digits = 1), round(450/n, digits = 1), round(500/n,digits = 1), round(550/n, digits = 1), round(600/n,digits = 1), round(650/n, digits = 1), round(700/n,digits = 1), round(750/n, digits = 1), round(800/n,digits = 1), round(850/n, digits = 1), round(900/n,digits = 1), round(950/n, digits = 1), round(1000/n, digits = 1)), expand = c(0, 0)) +
+         scale_y_continuous(breaks = c(0,round(70/n, digits = 1), round(100/n, digits = 1), round(150/n, digits = 1),round(180/n, digits = 1), round(240/n, digits = 1), round(300/n,digits = 1), round(350/n, digits = 1), round(400/n,digits = 1), round(450/n, digits = 1), round(500/n,digits = 1), round(550/n, digits = 1), round(600/n,digits = 1), round(650/n, digits = 1), round(700/n, digits = 1), round(750/n, digits = 1), round(800/n, digits = 1),round(850/n,digits = 1), round(900/n,digits = 1), round(950/n, digits = 1), round(1000/n, digits = 1)), expand = c(0, 0)) + 
+    geom_point(size = pointsize, alpha = pointalpha) +
+    # {if (is.null(rlang::expr(color_variable))) geom_point(pch = 21,size = pointsize, alpha = pointalpha) 
+    # else geom_point(aes(fill = color),pch = 21,size = pointsize, alpha = pointalpha)} +
+    geom_segment(aes(x = x1,y = y1, xend = xend, yend = yend), data = border, linetype = linetype) +
+    # Facet Grid
+    # facet_grid(cols = vars({{facet_variable}}),switch = "y") +
+    geom_text(data = labels, aes(x = x, y = y, label = label)) +
+    theme_bw() +
+    theme(panel.background = element_rect(fill = "white",
+                                          colour = "black",
+                                          linewidth = 0.5, linetype = "solid"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.line = element_line(linewidth = 0.5, linetype = "solid",colour = "black"),
+          legend.position = "bottom",
+          plot.title = element_text(hjust = 0.5),
+           # legend.position="none",
+          legend.title = element_blank(),
+          legend.text = element_text(size = 12),
+          axis.title = element_text(size = 14),
+          axis.text = element_text(size = 8),
+          aspect.ratio = 1) +
+    ggtitle(title) +
+    xlab(xlab) +
+    ylab(ylab) +
+    scale_fill_manual(values = c("1"="grey80","2"="grey30","3"="deepskyblue",
+                                 "4"="greenyellow","5"="tan1","6"="purple"))
+    
+ if (show_plot == TRUE) {
+     plot
+    } else {
+     plot |> pluck(1)
+    } 
+  
+}
+```
+
+```{r eval = params$analysis}
+#| label: Error Grid Plot
+#| fig-align: center
+Ap |> 
+   error_grid_plot(Reference_mmol, Gl,type = 1,
+                   show_plot = T,
+                   title = "Error Grid Plot", 
+                   xlab = "BG Reference (mmol/L)",
+                   ylab = "Glucose Result (mmol/L)", 
+                   linesize = 0.5, linetype = "solid", linecolor = "black",
+                   linealpha = 0.3, pointsize = 2, pointalpha = 0.8, 
+                   zones = NA,unit = "mol") +
+    coord_cartesian(xlim = c(0,30.0), ylim = c(0,30.0))
+```
+
+```{r eval = params$analysis}
+#| label: Error Grid Table
+Ap |> 
+   error_grid_plot(Reference_mmol, Gl,type = 1, show_plot = F,
+                   title = "", xlab = "", ylab = "", 
+                   linesize = 0.5, linetype = "solid", linecolor = "black",
+                   linealpha = 0.3, pointsize = 2, pointalpha = 0.8, 
+                   zones = NA,unit = "mol") |> 
+   mutate(Zones = factor(Zones,levels = c("A","B","C","D","E"))) |> 
+   tabyl(Zones,`Reference Type`) |> 
+   adorn_totals("row") |> 
+   adorn_percentages("col") |> 
+   adorn_pct_formatting(digits = 1) |>
+   adorn_ns() |> 
+   gt() |>
+   cols_align(align = "center",columns = everything()) |>
+   text_replace(pattern = "- \\(0\\)", replacement = "",locations = cells_body(columns = everything())) |>
+   opt_stylize(style = 6, color = "blue")
+```
+
+`r if(params$analysis){knitr::asis_output("# **Appendix**")}`
+
+`r if(params$analysis){knitr::asis_output("## Data Quality")}`
+```{r eval = params$analysis}
+#| label: Data Quality
+#| column: screen
+yuwell |> 
+    group_by(Path) |> 
+    mutate(No.Glucose = sum(!is.na(Gl))) |> 
+    slice(1,n()) |> 
+    mutate(ID = c(c("Start Test Time","End Test Time"))) |> 
+    ungroup() |> 
+    pivot_wider(id_cols = c(Path:`Sensor Serial Number`,No.Glucose),names_from = ID,values_from = `Date Time`) |> 
+    full_join(sasr2 |>
+                  select(Subject,`Application Date and Time`,`Removal Date and Time`)
+                  ,by = join_by(`Subject ID` == Subject)) |> 
+    left_join(de |>
+               # filter(DESPID08 == "Sensor") |>
+                select(Subject,`Message from DIR` = DEORES02) |>
+                group_by(Subject) |>
+               summarise(`Message from DIR` = str_flatten(`Message from DIR`," "),
+                          .groups = "drop"),
+               by = join_by(`Subject ID` == Subject)) |> 
+     dplyr::mutate(`Message from DIR` = case_when(`Subject ID` == "1170002" ~ "Subject has not returned to the clinic and more than likely won't, all devices are lost", .default = `Message from DIR`)) |> 
+     arrange(`Subject ID`) |> 
+     gt() |>
+     cols_align(align = "center",columns = everything()) |>
+     fmt_url(columns = Path,label = "Link",show_underline = F) |>
+     cols_merge(columns = c("Subject ID",Path),pattern = "{1} {2}") |>
+     sub_missing(columns = everything(),missing_text = "") |>
+     tab_header(title = md("**Summary Table for Data Quality**")) |>
+     opt_stylize(style = 6, color = "blue")
 ```
 
 ```{r eval = params$plot}
 #| label: Distinct Subject ID and Condition ID
-UD <- yuwell |> 
-      distinct(`Subject ID`) |> 
-      pull()
+ UD <- yuwell |> 
+       distinct(`Subject ID`) |> 
+       pull()
 ```
 
 ```{r eval = params$plot}
+#| label: Profile Function
 breakdown_condition_plot <- function(Id) {
   highchart() %>%
   # Add title
@@ -202,8 +893,9 @@ breakdown_condition_plot <- function(Id) {
 ```
 
 ```{r}
+#| label: Profile Test
 #| eval: false
-breakdown_condition_plot(Id = "1170004")
+breakdown_condition_plot(Id = "1170006")
 ```
 
 ```{r eval = params$plot}
