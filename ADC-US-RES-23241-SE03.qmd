@@ -34,7 +34,7 @@ params:
 
 <!-- Conversion 18.016*mmol/L = mg/dL -->
 
-<!-- Sibionics dynamic range 2.2mmol/L ~ 25.0mmol/L	 -->
+<!-- Yuwell dynamic range 1.7mmol/L ~ 27.8mmol/L	 -->
 
 `r if(params$analysis){htmltools::a("Study Request",href = gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-23241-CGM Comparison\Study Events_ Requests\SE_03\ADC_23241_SE03_Yuwell_EventRequest_Final_01Mar2024.pdf)"))}`
 ```{r}
@@ -811,6 +811,8 @@ yuwell |>
                by = join_by(`Subject ID` == Subject)) |> 
      dplyr::mutate(`Message from DIR` = case_when(`Subject ID` == "1170002" ~ "Subject has not returned to the clinic and more than likely won't, all devices are lost", .default = `Message from DIR`)) |> 
      arrange(`Subject ID`) |> 
+     # `Sensor Serial Number` != DUSPID03
+     # filter(`Condition ID` != DUCOD01) |> 
      gt() |>
      cols_align(align = "center",columns = everything()) |>
      fmt_url(columns = Path,label = "Link",show_underline = F) |>
