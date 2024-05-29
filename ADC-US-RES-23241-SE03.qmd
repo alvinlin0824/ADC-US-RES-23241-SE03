@@ -78,26 +78,6 @@ BG <- readRDS(gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinic
 ```
 
 ```{r}
-#| label: output yuwell.rds
-#| eval: false
-file_list |>
-         path_filter(regexp = "Yuwell",ignore.case = T) |> 
-         set_names() |>
-         map(\(path) vroom::vroom(path,show_col_types = F, col_types = c(ErrorCode = "c")),.progress = T) |> 
-         list_rbind(names_to = "Path") |> 
-         dplyr::mutate(`Subject ID` = str_extract(Path,regex("(?<=117_ERA/00)[:digit:]{7}")),
-                       `Condition ID` = str_extract(Path,regex("(?<=[:digit:]{7}_)[:alpha:]{3}")),
-                       `Sensor Serial Number` = str_extract(Path,regex("(?<=SN)[:digit:]+"))) |> 
-         select(Path, `Subject ID`, `Condition ID`, `Sensor Serial Number`, `Date Time` = Time, Gl = Iw, ErrorCode) |> 
-         saveRDS(gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-23241-CGM Comparison\Statistics\Programs\Datasets\SE03\AL\yuwell.rds)"))
-```
-
-```{r}
-#| label: Import yuwell.rds
-yuwell <- readRDS(gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-23241-CGM Comparison\Statistics\Programs\Datasets\SE03\AL\yuwell.rds)"))
-```
-
-```{r}
 #|label: Import SA
 sa <- read_sas(gsub("\\\\", "/", r"(\\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\OpenClinica\Current\sa.sas7bdat)")) |> 
       bind_rows(
@@ -118,6 +98,67 @@ de <- de |>
              DESPID02 = as.character(DESPID02),
              DEORES02 = str_to_sentence(DEORES02)) |>
       arrange(Subject)
+```
+
+```{r}
+#| label: output yuwell.rds
+#| eval: false
+file_list |>
+         path_filter(regexp = "Yuwell",ignore.case = T) |> 
+         set_names() |>
+         map(\(path) vroom::vroom(path,show_col_types = F, col_types = c(ErrorCode = "c")),.progress = T) |> 
+         list_rbind(names_to = "Path") |> 
+         dplyr::mutate(`Subject ID` = str_extract(Path,regex("(?<=117_ERA/00)[:digit:]{7}")),
+                       `Condition ID` = case_when(`Subject ID` == "1170035" ~ "LAB",
+                                        .default = str_extract(Path,regex("(?<=[:digit:]{7}_)[:alpha:]{3}"))),
+                       `Sensor Serial Number` = str_extract(Path,regex("(?<=SN)[:digit:]+"))) |> 
+         select(Path, `Subject ID`, `Condition ID`, `Sensor Serial Number`, `Date Time` = Time, Gl = Iw, ErrorCode) |> 
+         # Remedy for time shift
+         left_join(sa |> 
+                      # Remove sensor replaced
+                      anti_join(de |>
+                                filter(str_detect(DEORES06,regex("Sensor replaced",ignore_case = T))),
+                                by = c("Subject" = "Subject","DUSEQ01" = "DESPID02")) |> 
+            transmute(Subject = Subject,
+                      `Application Date and Time` = ymd_hm(str_c(DUDTC02,DUTM01,sep = " "))),
+                        by = join_by(`Subject ID` == Subject)) |> 
+            dplyr::mutate(`Date Time` = case_when(`Subject ID` %in% c("1170003","1170004","1170005","1170006","1170007","1170008","1170009","1170010","1170011")
+                       ~ `Date Time` + first(difftime(`Application Date and Time`,`Date Time`)),
+                                        .default = `Date Time`),
+                        `Application Date and Time` = NULL, .by = `Subject ID`) |> 
+         # one hour warm up
+         filter(`Date Time` >= first(`Date Time`) + dhours(1), .by = `Sensor Serial Number`) |> 
+         bind_rows(
+           dir_ls(regexp = "*[.]csv$") |>
+  map(\(path) vroom::vroom(path,show_col_types = F, col_types = c(ZERRORCODE = "c")),.progress = T) |>
+         list_rbind(names_to = "Path") |>
+  transmute(Path = Path,
+            `Subject ID` = str_sub(Path,1,7),
+            `Condition ID` = str_extract(Path,regex("(?<=SN[:digit:]{10}_)[:alpha:]{3}")),
+            `Sensor Serial Number` = str_extract(Path,regex("(?<=SN)[:digit:]+")),
+            `Date Time` = ymd_hms(ZRECEIVEDATETIME),
+             Gl = round_normal(ZGLU,1),
+             ErrorCode = ZERRORCODE)) |>
+         arrange(`Subject ID`) |>
+         saveRDS(gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-23241-CGM Comparison\Statistics\Programs\Datasets\SE03\AL\yuwell.rds)"))
+```
+
+```{r}
+# dir_ls(regexp = "*[.]csv$") |>
+#   map(\(path) vroom::vroom(path,show_col_types = F, col_types = c(ZERRORCODE = "c")),.progress = T) |>
+#          list_rbind(names_to = "Path") |>
+#   transmute(Path = Path,
+#             `Subject ID` = str_sub(Path,1,7),
+#             `Condition ID` = str_extract(Path,regex("(?<=SN[:digit:]{10}_)[:alpha:]{3}")),
+#             `Sensor Serial Number` = str_extract(Path,regex("(?<=SN)[:digit:]+")),
+#             `Date Time` = ymd_hms(ZRECEIVEDATETIME),
+#              Gl = ZGLU,
+#              ErroCode = ZERRORCODE)
+```
+
+```{r}
+#| label: Import yuwell.rds
+yuwell <- readRDS(gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-23241-CGM Comparison\Statistics\Programs\Datasets\SE03\AL\yuwell.rds)"))
 ```
 
 ```{r}
@@ -169,7 +210,8 @@ sasr2 <- sa |>
                    select(Subject,DRID01,DRDTC02,DRTM01) |> 
                    distinct(),
                    by = join_by(Subject,DUSEQ01 == DRID01)) |>
-         mutate(`Application Date and Time` = ymd_hm(str_c(DUDTC02,DUTM01,sep = " ")),
+         mutate(DUCOD01 = str_to_upper(DUCOD01),
+                `Application Date and Time` = ymd_hm(str_c(DUDTC02,DUTM01,sep = " ")),
                 `Removal Date and Time` = ymd_hm(str_c(DRDTC02,DRTM01,sep = " ")),
                 `Time On-body (Hours)` = round(as.numeric(difftime(`Removal Date and Time`,`Application Date and Time`,units = "hours"))+0.001,0),
                    `Time On-body (Days)` = round(as.numeric(difftime(`Removal Date and Time`,`Application Date and Time`,units = "days"))+0.001,0),
@@ -209,7 +251,6 @@ yuwell |>
     ggplot(aes(x = ErrorCode, y = Gl,color = ErrorCode)) +
     geom_boxplot()
 ```
-
 
 `r if(params$analysis){knitr::asis_output("# **Demographic**")}`
 ```{r eval = params$analysis}
@@ -298,22 +339,9 @@ c("AGE","VSORES03", "Kg","Inches","Meters","BMI","DD") |>
 ```
 
 ```{r}
-#| label:  Remedy for Time shift
+#| label:  Filter ErrorCode = 0
 yuwell <- yuwell |> 
-            left_join(sa |> 
-                      # Remove sensor replaced
-                      anti_join(de |>
-                                filter(str_detect(DEORES06,regex("Sensor replaced",ignore_case = T))),
-                                by = c("Subject" = "Subject","DUSEQ01" = "DESPID02")) |> 
-            transmute(Subject = Subject,
-                      `Application Date and Time` = ymd_hm(str_c(DUDTC02,DUTM01,sep = " "))),
-                        by = join_by(`Subject ID` == Subject)) |> 
-            dplyr::mutate(`Date Time` = case_when(`Subject ID` %in% c("1170003","1170004","1170005","1170006","1170007","1170008","1170009","1170010","1170011")
-                       ~ `Date Time` + first(difftime(`Application Date and Time`,`Date Time`)),
-                                        .default = `Date Time`),
-                        `Application Date and Time` = NULL, .by = `Subject ID`) |> 
-            # Remove glucose readings with errorcode = 11 or 16 
-            filter(ErrorCode == "0")
+          filter(ErrorCode == "0")
 ```
 
 ```{r eval = params$analysis}
@@ -800,8 +828,11 @@ yuwell |>
     ungroup() |> 
     pivot_wider(id_cols = c(Path:`Sensor Serial Number`,No.Glucose),names_from = ID,values_from = `Date Time`) |> 
     full_join(sasr2 |>
-                  select(Subject,`Application Date and Time`,`Removal Date and Time`)
-                  ,by = join_by(`Subject ID` == Subject)) |> 
+                  select(Subject:`Removal Date and Time`)
+                  # select(Subject,`Application Date and Time`,`Removal Date and Time`)
+                  # ,by = join_by(`Subject ID` == Subject)) |> 
+                  ,by = join_by(`Subject ID` == Subject, `Condition ID` == DUCOD01, 
+                                `Sensor Serial Number` == DUSPID03)) |> 
     left_join(de |>
                # filter(DESPID08 == "Sensor") |>
                 select(Subject,`Message from DIR` = DEORES02) |>
@@ -899,7 +930,7 @@ breakdown_condition_plot <- function(Id) {
 ```{r}
 #| label: Profile Test
 #| eval: false
-breakdown_condition_plot(Id = "1170006")
+breakdown_condition_plot(Id = "1170003")
 ```
 
 ```{r eval = params$plot}
