@@ -573,6 +573,8 @@ Ap |>
 Ap |> 
   ggplot() +
   geom_point(aes(x = Reference_mmol, y = `Difference(mmol/L)`)) +
+  geom_path(tibble(x = c(0,70/18.016,500/18.016), y = c(20/18.016,20/18.016,100/18.016)), mapping = aes(x = x, y = y),linetype = 2) +  
+  geom_path(tibble(x = c(0,70/18.016,500/18.016), y = c(-20/18.016,-20/18.016,-100/18.016)), mapping = aes(x = x, y = y),linetype = 2) +
   labs(title = "System Agreement Plot",x = "BG Reference (mmol/L)", y = "Bias (mmol/L)") +
   scale_y_continuous(breaks = seq(-20,20,5),limits = c(-20,20)) +
   scale_x_continuous(breaks = seq(0,30,5),limits = c(0,30)) +
@@ -851,6 +853,127 @@ yuwell |>
      sub_missing(columns = everything(),missing_text = "") |>
      tab_header(title = md("**Summary Table for Data Quality**")) |>
      opt_stylize(style = 6, color = "blue")
+```
+
+```{r}
+#|label: Import IE (Visit Date)
+#| eval: false
+ie <- read_sas(gsub("\\\\", "/", r"(\\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\OpenClinica\Current\ie.sas7bdat)"))
+ie <- ie |>
+      mutate(Subject = as.character(Subject)) |>
+      arrange(Subject, IEDTC01)
+```
+
+```{r}
+#| label: List of DE
+#| eval: false
+de |> 
+     transmute( Subject = Subject,
+            `Date of the Incident` = format.Date(DEDTC02,format = "%d%b%y"),
+            `Time of the Incident` = case_when(!str_detect(DETM01,"^$|pattern") ~ DETM01,
+                                               .default = DESPID13),
+            `Sensor SN` = DESPID14,
+            Description = str_to_sentence(DEORES02),
+           `Action Taken` = str_to_sentence(DEORES03)) |> 
+        gt() |> 
+        cols_align(align = "center",columns = everything()) |> 
+        tab_header(title = md("**List of Device Incident**")) |> 
+        opt_stylize(style = 6, color = "blue") |> 
+        gtsave("de.docx")
+```
+
+```{r}
+#|label: Import AE1
+ae1 <- read_sas(gsub("\\\\", "/", r"(\\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\OpenClinica\Current\ae1.sas7bdat)"))
+ae1 <- ae1 |>
+       filter(!str_detect(AEYN01,regex("Check here if no data recorded",ignore_case = T))) |>
+       mutate(Subject = as.character(Subject)) |>
+       arrange(Subject)
+```
+
+```{r}
+#| label:  Adverse Events Related to Study Device or Study Procedure
+#| eval: false
+ae1 |> 
+    filter(AEREL01 %in% c("Related","Possibly related","Definitely related") | AEREL02 %in% c("Related","Possibly related")) |>
+  transmute(Subject = Subject,
+            `Sensor Number` =  AENUM04,
+            `Onset Date` = format.Date(AESTDT01,format = "%d%b%y"),
+             Symptoms = case_when(str_detect(AEDESC01,regex("Other",ignore_case = T)) ~ str_c(AEDESC01,str_to_sentence(AEDSCO02),sep = "-"),
+                              .default = AEDESC01
+                                ),
+            `Related to study device` = str_to_title(AEREL01),
+            `Related to study procedure` = str_to_title(AEREL02),
+             Anticipated = str_to_title(AEEVNT01),
+             Severity = AESEV01,
+             SAE = AESER01,
+             Outcome = AEDUR01,
+            `Outcome Date` = format.Date(AEENDT01,format = "%d%b%y")) |> 
+        gt() |> 
+        cols_align(align = "center",columns = everything()) |> 
+        opt_stylize(style = 6, color = "blue") |> 
+        tab_header(title = md("**Adverse Events Related to Study Device or Study Procedure**")) |> 
+        gtsave("ae.docx")
+```
+
+```{r}
+#| label:  Adverse Events Not Related to Study Device or Procedure
+#| eval: false
+ae1 |>
+    filter(AEREL01 == "Not related" & AEREL02 == "Not related") |> 
+    transmute(Subject = Subject,
+             `Onset Date` = format.Date(AESTDT01,format = "%d%b%y"),
+              Symptoms = str_to_sentence(case_when(AEORES01 == "Yes" ~ AEDESC01,
+                                              .default =  AETERM01)),
+              Severity = AESEV01,
+              SAE = AESER01,
+              Outcome = AEDUR01,
+              `Outcome Date` = format.Date(AEENDT01,format = "%d%b%y")) |>
+     gt() |> 
+     cols_align(align = "center",columns = everything()) |> 
+     sub_missing(columns = everything(),missing_text = "") |> 
+     opt_stylize(style = 6, color = "blue") |> 
+     tab_header(title = md("**Adverse Events Not Related to Study Device or Procedure**"))
+```
+
+```{r}
+#|label: Import PD
+pd <- read_sas(gsub("\\\\", "/", r"(\\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-23241\SE03\OpenClinica\Current\pd.sas7bdat)"))
+pd <- pd |>
+      filter(!str_detect(DVYN,regex("Check here if no data recorded",ignore_case = T))) |>
+      mutate(Subject = as.character(Subject)) |>
+      arrange(Subject)
+```
+
+```{r}
+#| label: PD list
+#| eval: false
+pd |> 
+  sjlabelled::remove_all_labels() |>
+  transmute(Subject = Subject,
+            `Deviation Date` = format.Date(DVDTC1,format = "%d%b%y"),
+            `Deviation Type` = DVTERM,
+             Description = str_to_sentence(DVDESC1),
+            `Preventative Action` = str_to_sentence(DVDESC4)
+         ) |> 
+  gt() |> 
+  opt_stylize(style = 6, color = "blue") |>
+  cols_align(align = "center",columns = everything()) |> 
+  tab_header(title = md("**Protocol Deviations List**")) |> 
+  gtsave("pd.docx")
+```
+
+```{r}
+#| label: List of Sensor Operational Duration
+#| eval: false
+surv_data |> 
+  select(`Subject ID`, Sensor, `Sensor Start Time`, `Time Operational(Days)`) |> 
+  mutate(`Sensor Start Time` = format.Date(`Sensor Start Time`,format = "%d%b%y %H:%M:%S")) |> 
+  gt() |> 
+  cols_align(align = "center",columns = everything()) |> 
+  tab_header(title = md("**List of Sensor Operational Duration**")) |> 
+  opt_stylize(style = 6, color = "blue") |> 
+  gtsave("sensor.docx")
 ```
 
 ```{r eval = params$plot}
