@@ -60,7 +60,7 @@ library(gt)
 ```{r}
 #| label: Import yuwell.txt and freestyle.csv
 #| eval: false
-file_list <- dir_ls(gsub("\\\\", "/", r"(\\Wf00168p.oneabbott.com\DATA1\cdm\ADC-US-RES-23241\SE03\UploadData)"),recurse = T, regexp = "*[0-9][.]txt$|*freestyle[.]csv$") |> 
+file_list <- dir_ls(gsub("\\\\", "/", r"(\\Wf00168p.oneabbott.com\DATA1\cdm\ADC-US-RES-23241\SE03\UploadData)"),recurse = T, regexp = "*[0-9][.]txt$|*freestyle[.]csv$|*[0-9][.]csv$") |> 
              path_filter(regexp = "Transfers", invert = T, ignore.case = T)
 ```
 
@@ -104,7 +104,7 @@ de <- de |>
 #| label: output yuwell.rds
 #| eval: false
 file_list |>
-         path_filter(regexp = "Yuwell",ignore.case = T) |> 
+         path_filter(regexp = ".*Yuwell.*[.]txt$",ignore.case = T) |> 
          set_names() |>
          map(\(path) vroom::vroom(path,show_col_types = F, col_types = c(ErrorCode = "c")),.progress = T) |> 
          list_rbind(names_to = "Path") |> 
@@ -129,7 +129,9 @@ file_list |>
          # one hour warm up
          filter(`Date Time` >= first(`Date Time`) + dhours(1), .by = `Sensor Serial Number`) |> 
          bind_rows(
-           dir_ls(regexp = "*[.]csv$") |>
+           file_list |>
+            path_filter(regexp = ".*Yuwell.*[.]csv$",ignore.case = T) |>
+           # dir_ls(regexp = "*[.]csv$") |>
   map(\(path) vroom::vroom(path,show_col_types = F, col_types = c(ZERRORCODE = "c")),.progress = T) |>
          list_rbind(names_to = "Path") |>
   transmute(Path = Path,
